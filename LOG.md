@@ -27,12 +27,19 @@ because vectorisation hides order timing, partial fills, and cash-constraint bug
 
 ### 2026-08-12 — Scaffold, core engine, verified test suite
 
-Entire session written as work happened. One sitting, nothing committed yet.
+Entire session written as work happened. One sitting, committed as `99b7b82` at the end of it.
 
 #### Repository setup
 
 `git init` + `git remote add origin` against the pre-existing GitHub repo. No commit, no push —
 per the workspace rule that every commit is approved first.
+
+The local repo was initialised fresh, so its history was unrelated to the remote's, which already
+carried an `Initial commit` (`554490b`) holding a `LICENSE` and a one-line README stub created
+through the GitHub web UI. Reconciled by rebasing the session's two commits onto that initial
+commit rather than force-pushing over it — the LICENSE is worth keeping, and discarding a commit
+that exists on a remote is not something to do to avoid a two-minute conflict resolution. The
+only conflict was add/add on `README.md`, resolved in favour of this project's version.
 
 **Package named `evbt`.** Project 01's package is `tierzero`, which names the *tier* rather than
 the project; reusing that pattern would collide the moment both projects are installed into one
@@ -228,4 +235,5 @@ is the one that must pass. Steps 1 and 3 are the honest framing around it.
    numbers from published estimates. Any result sensitive to their exact value must be reported
    as a range — `analytics/capacity.py` sweeps them for this reason, but no result has yet been
    produced that needs it.
-8. **Nothing committed.** The working tree holds the full session's work, unstaged.
+8. **Pushed.** The session's work is on `main` at the remote: `99b7b82` (51 files, 8,677 lines)
+   on top of the repo's original `554490b`.
