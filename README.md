@@ -2,11 +2,31 @@
 
 A backtester that simulates realistic execution bar by bar — market events → signal events → order events → fill events → portfolio updates — with transaction costs, market impact, portfolio accounting, risk constraints, and walk-forward evaluation. Built to answer one question a vectorised backtester cannot: **when, exactly, could this order have filled, and for how much?**
 
-## Status
+## The result
 
-**Engine core built and verified. The project's done criterion is not yet met.**
+**The engine reproduces Fama-French HML to within 0.5 basis points per month, across 1,199 months (July 1926 – June 2026), with no month deviating by more than 1 bp.**
 
-282 tests pass with 94% coverage, including end-to-end accounting against answers computed by hand and a no-lookahead barrier that is enforced structurally rather than by convention. What has *not* happened is the acceptance test the spec actually asks for: reproducing a published strategy's returns to within a few basis points. Every expected value in the current suite is hand-computed or synthetic, which proves the engine is self-consistent — not that it agrees with reality. See [What is not done](#what-is-not-done) and `LOG.md`.
+| | mean \|diff\| | max \|diff\| | months > 1 bp |
+|---|---|---|---|
+| Arithmetic reconstruction vs published HML | 0.2510 bps | 0.5000 bps | 0 / 1,200 |
+| **Engine's traded NAV returns vs published HML** | **0.2511 bps** | **0.5000 bps** | **0 / 1,199** |
+
+The two rows being identical is the actual finding. French publishes factor returns rounded to two decimal places in percent, so the half-ulp of his own reporting is exactly 0.5 bp — the bound the engine hits. **The engine contributes no error at all**; the entire residual is his rounding. A mis-signed short, a cost basis carried across a rebalance, a stale NAV used for sizing, or an off-by-one in fill timing would each show up as drift beyond that floor, and none does.
+
+Reproduce it with:
+
+```bash
+python scripts/fetch_french_data.py
+python scripts/replicate_hml.py
+```
+
+320 tests pass with 95% coverage. The replication is pinned in `tests/integration/test_hml_replication.py` (skipped until the data is fetched); the rest of the suite needs no network and no data.
+
+### What this does and does not establish
+
+It establishes that the engine's **accounting** is correct: it took French's six size × book-to-market portfolios as tradeable instruments and arrived at his factor by actually trading them — sizing orders against NAV, filling them a bar later, carrying a 100% short book, marking to market, and compounding across a century.
+
+It does *not* establish that HML can be rebuilt bottom-up from free data. That is a much harder problem, it needs CRSP and Compustat, and it is deliberately factored out here: feeding French's own portfolios in means a mismatch cannot be blamed on the price source, which is what makes this a clean test of the engine specifically. See [What is not done](#what-is-not-done).
 
 ## Why build one rather than use `backtrader` or `zipline`
 
@@ -193,7 +213,11 @@ print(estimate_capacity(
 
 Read this before trusting anything the engine produces.
 
-**The done criterion is unmet, and it is the important one.** The spec requires reproducing a documented strategy — Fama-French HML — to within a few basis points of its published monthly returns. That has not been attempted. Every expected value in the test suite is hand-computed or synthetic, which establishes internal consistency and nothing about agreement with an external source. The planned three-step approach (validate French's data arithmetically, then drive the engine with his six size/BM portfolios at zero cost and match his HML, then attempt a bottom-up construction on free data and report the gap honestly) is written up in `LOG.md`. Until step two passes, treat this as a well-tested engine of unverified accuracy.
+**HML has not been built bottom-up from free data.** The replication validates the engine's accounting by feeding it French's own portfolios. It says nothing about whether the *factor construction* — the 2×3 sort on size and book-to-market, NYSE breakpoints, the June rebalance with prior-December accounting data — can be reproduced from free sources. It largely cannot: that needs CRSP and Compustat, and Project 01's fundamentals only begin in 2009 with survivorship-incomplete prices. Quantifying that gap is worth doing and is not done here. Do not read "reproduces HML to 0.5 bps" as "can build HML from scratch".
+
+**The replication is frictionless by construction.** Zero commission, zero spread, zero impact, zero slippage, zero financing — because the published series is a gross academic factor return and charging it anything would make the comparison meaningless rather than conservative. It therefore validates the accounting, not the cost models. The cost models are unit-tested against their own formulas and calibrated to published coefficients, which is a weaker claim.
+
+**Monthly bars mean the fill rule is barely exercised.** The replication's synthetic bars have `open[t] == close[t-1]`, so the engine sizes and fills at the same price and no execution drift enters. That is deliberate — it isolates accounting from timing — but it means the next-bar fill rule, partial fills, and participation caps are exercised only by the synthetic tests in `tests/unit/test_broker.py` and `tests/integration/test_no_lookahead.py`, not by the replication.
 
 **No `EXPLANATION.md`.** Project 01 carries a plain-language companion with a glossary; the portfolio standard says to follow that pattern. Not yet written.
 

@@ -117,6 +117,42 @@ class Strategy(ABC):
         """Called once after the last bar. Optional."""
 
 
+class FixedWeightPortfolio(Strategy):
+    """
+    Restate the same target weights every bar, rebalancing back to them.
+
+    Pairs with `ExplicitWeightSizer`, which passes `strength` through as the
+    weight verbatim. Deliberately signals on *every* bar rather than only when
+    the book drifts: a fixed-weight factor portfolio is defined as being
+    rebalanced each period, so letting the weights drift between rebalances
+    would be a different portfolio with a different return.
+
+    This is what the HML replication runs. It is also the cleanest end-to-end
+    test the engine has, because the arithmetic is closed-form: a book holding
+    weights w_i in assets returning r_i, funded from cash, has NAV return
+    exactly sum(w_i * r_i) when costs are zero. Any deviation is an accounting
+    bug with nowhere to hide.
+    """
+
+    name = "fixed_weight"
+
+    def __init__(self, weights: dict[str, float]):
+        if not weights:
+            raise ValueError("weights must not be empty")
+        self.weights = dict(weights)
+
+    def on_bar(self, event: MarketEvent, ctx: StrategyContext) -> Iterable[SignalEvent]:
+        signals = []
+        for symbol, weight in self.weights.items():
+            if ctx.price(symbol) is None:
+                continue
+            if weight >= 0:
+                signals.append(ctx.long(symbol, strength=weight))
+            else:
+                signals.append(ctx.short(symbol, strength=weight))
+        return signals
+
+
 class BuyAndHold(Strategy):
     """
     Buy an equal-weight basket on the first bar and hold it.

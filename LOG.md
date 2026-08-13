@@ -3,9 +3,11 @@
 **Tier:** 0 (Infrastructure)
 **Spec:** `ResearchToDo.md` → Part 3 → Tier 0 → Project 2
 **Repo:** https://github.com/fleeeeetcheeee/Event-driven-backtesting-engine
-**Status:** Engine core built and **verified** — 282 tests pass, 94% coverage, including
-hand-computed end-to-end accounting and the no-lookahead barrier. The spec's **done criterion is
-not yet met**: no published strategy has been reproduced. See [Open items](#open-items).
+**Status:** **Done criterion met.** The engine reproduces Fama-French HML to within 0.5 bps per
+month over 1,199 months (1926-07 – 2026-06), with zero months deviating by more than 1 bp — and
+its error distribution is indistinguishable from the pure arithmetic reconstruction's, meaning
+the engine contributes no error beyond French's own 2-decimal rounding. 320 tests pass, 95%
+coverage. See [Open items](#open-items) for what remains.
 
 ---
 
@@ -177,63 +179,149 @@ engine sized 1,000 shares off day 1's close of 100 and filled at day 2's open of
 to −10,000. That is the barrier costing money in the expected direction, and it was the first
 sign the ordering was right.
 
+### 2026-08-13 — HML replication: the done criterion
+
+Written as work happened.
+
+#### Getting the data
+
+`scripts/fetch_french_data.py` pulls `6_Portfolios_2x3_CSV.zip` and
+`F-F_Research_Data_Factors_CSV.zip` from Ken French's library into `data/raw/fama_french/`,
+writing bytes verbatim with an atomic `.tmp`-then-rename — same ingestion discipline as Project
+01. Both files are gitignored; the repo ships the replication, not the data.
+
+#### The parser was most of the work
+
+French's format is worse than it looks. `6_Portfolios_2x3.csv` holds **ten** stacked tables in
+one file: value- and equal-weighted returns, monthly and annual, plus firm counts, average market
+cap, and four BE/ME variants. Each is introduced by a free-text title and a header row beginning
+with a bare comma. Monthly and annual blocks share identical column names and are distinguished
+only by the width of the date field (`202606` vs `2026`). Missing data is `-99.99` or `-999`.
+Returns are in percent.
+
+Line numbers are useless — French republishes monthly and every table shifts — so `french.py`
+locates tables **structurally**: a `,`-leading header, then consecutive rows whose first field is
+a 4- or 6-digit integer, with the title taken from the nearest preceding non-empty line. Verified
+against the real file: it finds all ten tables and classifies periodicity correctly.
+
+**The trap, and it is a real one.** The value-weighted and equal-weighted monthly tables are
+adjacent and have identical column names. HML is built from the **value-weighted** set. Reading
+the equal-weighted table by mistake yields a series that still correlates **0.93** with the real
+HML and is wrong by **92 bps a month** — plausible enough to publish, entirely incorrect. So
+`weighting` is a required argument with no default, and the wrongness is pinned as a control
+assertion in `test_equal_weighted_is_a_different_and_wrong_factor`. Similarly `SMALL LoBM` is
+low book-to-market, i.e. small-cap *growth*; reading it as value inverts the factor's sign, so
+the columns are renamed to `SmallGrowth`/`SmallValue` on load rather than left as French's
+labels.
+
+#### Making the comparison exact rather than approximate
+
+`returns_to_bars` converts French's monthly returns into OHLCV bars with `open[t] = close[t-1]`,
+so the price series is continuous across bars. The engine sizes orders at bar `t`'s close and
+fills them at bar `t+1`'s open — the *same price* — so no execution drift enters and any
+deviation found is an accounting bug with nowhere to hide. Volume is set enormous so the
+participation cap never binds. This is a validation harness, not a simulation of trading these
+portfolios, and the README says so.
+
+Added `FixedWeightPortfolio` to `strategy/base.py`: restates the target weights every bar. It
+signals on *every* bar deliberately — a fixed-weight factor is *defined* as rebalanced each
+period, and letting the weights drift between rebalances would be a different portfolio with a
+different return.
+
+#### Result
+
+Both steps passed on the first run, which was not the expected outcome and is worth recording as
+such. Max deviation is exactly 0.5000 bps in both — recognisably the half-ulp of French's
+2-decimal reporting rather than an arbitrary number, which is what makes it credible: an
+accounting bug would produce a messy bound, not the data's own precision floor.
+
+The closed-form check behind it: a book holding weights `wᵢ` in assets returning `rᵢ`, funded
+from cash, has NAV return exactly `Σ wᵢrᵢ`. For the HML weights that is the factor return. So
+the engine had a known target and hit it.
+
+#### One wrong assumption of mine, caught by a test
+
+I asserted the book would be dollar-neutral with max |net leverage| under 5%, and it hit **26%**.
+That was my expectation being wrong, not the engine. The equity curve is snapshotted at month
+end — after a full month of drift, before the next rebalance fills — and the worst months are
+July and August 1932 (HML +35.5% and +34.2%), September 1939, April 1933, and March 2020.
+Exactly the months when value and growth diverge most. Median net leverage is 1.6%.
+
+Rather than loosening the bound to whatever passed, I replaced it with a test that asserts the
+*mechanism*: net drift must correlate with |HML| above 0.5. A book that had silently stopped
+rebalancing would drift monotonically and show no such relationship, so the new test
+distinguishes the two cases where a loosened threshold would not.
+
+#### Verification
+
+**320 passed, 95% coverage** (up from 282 / 94%). New: 25 parser tests against a synthetic
+fixture in the real format — no network, no data directory needed — and 13 replication tests that
+skip cleanly when the French files are absent, so a fresh clone still runs green.
+
 ---
 
 ## Status against the done criterion
 
-**Not met.** The engine is built and its internal arithmetic is verified, but the spec asks for
-something stronger: reproduce a *published* return series to within a few basis points. Nothing
-in the current test suite compares against an external source — every expected value is either
-hand-computed or synthetic, which proves self-consistency and not correctness against reality.
+**Met**, for the part of it that tests the engine. Steps 1 and 2 of the planned approach both
+pass; step 3 (bottom-up construction on free data) remains deliberately unattempted — see
+[Open items](#open-items).
 
-Planned approach, in the order it should be attempted:
+| | mean \|diff\| | max \|diff\| | months > 1 bp |
+|---|---|---|---|
+| Step 1 — arithmetic reconstruction vs published HML | 0.2510 bps | 0.5000 bps | 0 / 1,200 |
+| Step 2 — engine's traded NAV returns vs published HML | 0.2511 bps | 0.5000 bps | 0 / 1,199 |
 
-1. **Arithmetic check (no engine).** Download Ken French's 6 portfolios formed on size and
-   book-to-market, plus his published HML. Reconstruct
-   `HML = ½(SmallValue + BigValue) − ½(SmallGrowth + BigGrowth)` and confirm it matches his HML
-   to rounding. This validates the *data* before the engine is involved, so a later mismatch
-   cannot be blamed on it.
-2. **Engine check.** Drive the engine with those 6 portfolios as tradeable instruments,
-   rebalancing monthly to weights `(+½, +½, −½, −½)` with all costs set to zero. The engine's
-   monthly return series must match French's published HML to a few bps. This is a genuine test
-   of the event loop, order generation, fill handling, portfolio accounting, and return
-   computation, with data quality factored out — any drift is an engine bug by construction.
-3. **Bottom-up attempt, reported honestly.** Build HML from scratch on free data (Project 01's
-   output) and report how far off it lands and why. Matching French bottom-up needs
-   CRSP + Compustat; with survivorship-incomplete free prices and fundamentals starting in 2009,
-   it will not reach a few bps. The *size of the gap* is the interesting result, and quantifying
-   what free data costs is a stronger write-up than quietly substituting an easier target.
+The rows being identical is the result, not a coincidence. French publishes to two decimals in
+percent, so the half-ulp of his own reporting is exactly 0.5 bp — the floor the engine sits on.
+The engine adds nothing to it. That is asserted directly in
+`test_engine_adds_no_error_beyond_french_rounding`, which compares the two error distributions
+rather than each against a tolerance: a mis-signed short, a basis carried across a rebalance, a
+stale NAV used for sizing, or an off-by-one in fill timing would each push the engine's error
+above the arithmetic floor, and none does.
 
-Step 2 is what the done criterion is really testing — whether the backtester is trustworthy — and
-is the one that must pass. Steps 1 and 3 are the honest framing around it.
+Step 2 is what the criterion is really asking — whether the backtester is trustworthy — because
+the engine had to *trade* its way there: size orders against NAV, fill them a bar later, carry a
+100% short book, mark to market, and compound across a century of monthly rebalances (4,800
+orders, 4,796 fills, zero rejections).
 
 ---
 
 ## Open items
 
-1. **Done criterion unmet.** The three steps above. Requires a network fetch from Ken French's
-   data library, which has not been attempted yet.
+1. **HML not built bottom-up (step 3).** The replication validates the engine's accounting by
+   feeding it French's own portfolios; it says nothing about whether the *factor construction* —
+   2×3 sort on size and book-to-market, NYSE breakpoints, June rebalance on prior-December
+   accounting data — can be reproduced from free sources. It largely cannot: that needs
+   CRSP + Compustat, and Project 01's fundamentals begin only in 2009 with survivorship-incomplete
+   prices. Quantifying the size of that gap is the interesting write-up and is still worth doing.
+   Nothing in the current claim depends on it, but "reproduces HML to 0.5 bps" must not be read
+   as "can build HML from scratch".
 2. **No `EXPLANATION.md`.** Project 01 carries a plain-language companion with a glossary and the
-   portfolio standard says to follow that pattern. Not written yet; should be, once the done
-   criterion work settles what the headline result is.
-3. **Borrow accrues one interval early.** Financing is charged at each mark for the elapsed
+   portfolio standard says to follow that pattern. Now unblocked — the headline result is settled,
+   so this should be written next.
+3. **The replication is frictionless and monthly.** All costs and financing are zero, because
+   the published series is a gross academic return. So it validates accounting, not the cost
+   models, which remain tested only against their own formulas. And because
+   `open[t] == close[t-1]` by construction, the next-bar fill rule and partial fills are
+   exercised only by the synthetic tests, not by the replication.
+4. **Borrow accrues one interval early.** Financing is charged at each mark for the elapsed
    interval using the position *after* that bar's fills, so a newly opened short is charged for
    the interval preceding its own existence. The error is a single interval per position
    lifetime, is in the conservative direction (overcharging), and is immaterial on a
    multi-month hold — but it is wrong, and it is documented rather than fixed because the fix
    needs the previous mark's positions carried as extra state.
-4. **`config.py` is at 0% coverage.** Nothing imports it yet — paths are passed explicitly
+5. **`config.py` is at 0% coverage.** Nothing imports it yet — paths are passed explicitly
    everywhere. It exists for the done-criterion scripts to use and is untested until they do.
-5. **No Parquet data handler.** `DataFrameDataHandler` holds everything in memory, which covers a
+6. **No Parquet data handler.** `DataFrameDataHandler` holds everything in memory, which covers a
    30-year daily backtest on 1,000 names (~7.5M rows) but not intraday. The `DataHandler`
    contract is designed so a chunked Parquet reader drops in behind it; not needed yet.
-6. **Sector constraint binds on net, not gross.** An internally hedged sector passes the limit
+7. **Sector constraint binds on net, not gross.** An internally hedged sector passes the limit
    even when its gross exposure is large. The principled fix is a factor-model constraint
    (Project 10); this is the standard exposure-based approximation and is noted as such in
    `risk.py`.
-7. **Impact coefficients are literature values, not fitted.** `eta`, `gamma`, and `Y` are round
+8. **Impact coefficients are literature values, not fitted.** `eta`, `gamma`, and `Y` are round
    numbers from published estimates. Any result sensitive to their exact value must be reported
    as a range — `analytics/capacity.py` sweeps them for this reason, but no result has yet been
    produced that needs it.
-8. **Pushed.** The session's work is on `main` at the remote: `99b7b82` (51 files, 8,677 lines)
+9. **Pushed.** The session's work is on `main` at the remote: `99b7b82` (51 files, 8,677 lines)
    on top of the repo's original `554490b`.
