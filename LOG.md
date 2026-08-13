@@ -258,6 +258,65 @@ distinguishes the two cases where a loosened threshold would not.
 fixture in the real format — no network, no data directory needed — and 13 replication tests that
 skip cleanly when the French files are absent, so a fresh clone still runs green.
 
+### 2026-08-13 — Clearing the open items
+
+Written as work happened, after the HML replication was committed (`e2e8c53`).
+
+**Borrow accrual fixed (was open item 3).** Carry was charged at each mark against the book
+*after* that bar's fills, so a short opened on day 1 paid for the night of day 0. Fixed by
+snapshotting the short market values at each mark and accruing the following interval against
+that basis — carry is owed on what was *held* through an interval, and that is the position which
+existed at its start. Cash interest deliberately still uses the live balance: unlike a borrow,
+which is contracted against a specific position held overnight, the cash balance is simply what
+it is when interest is computed.
+
+The integration test's hand calculation moved from 11 accrual days to 10, which is the fix
+visible in a number. Added `test_no_carry_is_charged_before_the_position_exists` as a regression
+pin.
+
+**`ParquetDataHandler` added (was open item 6).** Streams from a Parquet store in date chunks via
+DuckDB, so peak memory is set by the chunk size rather than by the length of the backtest. Reads
+single files, plain directories, and Hive-partitioned `date=YYYY-MM-DD/` trees.
+
+The property worth having is that chunking is *invisible*: `test_chunk_size_is_invisible_in_the_output`
+runs chunk sizes of 1, 7, 50 and 10,000 and asserts every slice is identical to the in-memory
+handler's. A backtest whose results depended on available RAM would not be reproducible. That
+required carrying a warm-up tail across chunk boundaries so the rolling volatility window does not
+restart — without it, every boundary produces a run of bars with no vol estimate and therefore no
+slippage, purely as an artefact of the chunk size.
+
+**A wrong assumption caught while writing it.** I wrote `PIT_STORE_COLUMNS` mapping Project 01's
+schema from memory as `open_unadj` / `high_unadj` / `low_unadj` / `close_unadj`, symmetrically.
+Reading that project's `price_cleaner.py` shows the schema is *asymmetric*: only `close` carries
+the unadjusted/adjusted split; `open`, `high`, `low` and `volume` are stored raw under plain
+names. The mapping I had written would have failed at query time against the real store. Corrected
+and pinned in `test_pit_store_mapping_matches_project_01s_actual_schema`, with a note in the
+module explaining the asymmetry — this is the second time in this project that assuming a schema
+instead of reading it would have cost real time.
+
+**Sector gross constraint added (was open item 7).** `max_sector_weight` binds on *net* exposure,
+so a book 50% long and 50% short one sector passes it while carrying a large bet on within-sector
+dispersion — a stat-arb book is exactly that shape. Added `max_sector_gross_weight` alongside it.
+When both bind, the tighter scale factor governs, which satisfies both in one pass since each
+constraint is homogeneous of degree one in the weights. Neither is a substitute for a factor-model
+constraint (Project 10); both are the standard exposure-based approximations and the module says so.
+
+**`config.py` tests added (was open item 4).** It went from 0% coverage to tested once the French
+scripts started importing it. `trading_days_per_year` gets its own assertion because 252 vs 250 vs
+260 makes Sharpe ratios silently incomparable across codebases.
+
+**`EXPLANATION.md` written (was open item 2).** Plain-language companion for a non-expert, with a
+glossary of every technical term, following Project 01's pattern. It states the same limitations
+as the README rather than a softened version of them — in particular that reproducing HML to
+0.5 bps does not mean HML can be built from scratch.
+
+**Verification: 353 passed, 95% coverage** (up from 320 / 95%).
+
+**Two open items closed as out of scope rather than done**, with reasoning in
+[Open items](#open-items): bottom-up HML construction is Project 3's subject matter, not this
+project's, and the frictionless-replication caveat is a property of the validation method rather
+than a defect to fix.
+
 ---
 
 ## Status against the done criterion
@@ -288,40 +347,48 @@ orders, 4,796 fills, zero rejections).
 
 ## Open items
 
-1. **HML not built bottom-up (step 3).** The replication validates the engine's accounting by
-   feeding it French's own portfolios; it says nothing about whether the *factor construction* —
-   2×3 sort on size and book-to-market, NYSE breakpoints, June rebalance on prior-December
-   accounting data — can be reproduced from free sources. It largely cannot: that needs
-   CRSP + Compustat, and Project 01's fundamentals begin only in 2009 with survivorship-incomplete
-   prices. Quantifying the size of that gap is the interesting write-up and is still worth doing.
-   Nothing in the current claim depends on it, but "reproduces HML to 0.5 bps" must not be read
-   as "can build HML from scratch".
-2. **No `EXPLANATION.md`.** Project 01 carries a plain-language companion with a glossary and the
-   portfolio standard says to follow that pattern. Now unblocked — the headline result is settled,
-   so this should be written next.
-3. **The replication is frictionless and monthly.** All costs and financing are zero, because
-   the published series is a gross academic return. So it validates accounting, not the cost
-   models, which remain tested only against their own formulas. And because
+All the actionable items from 2026-08-12 are now closed — see the 2026-08-13 entry above. What
+remains is split into standing limitations (properties of the approach, documented rather than
+fixable) and work that belongs to a different project.
+
+### Standing limitations
+
+1. **The replication is frictionless and monthly.** All costs and financing are zero in it,
+   because French's published series is a gross academic return and charging it anything would
+   make the comparison meaningless rather than conservative. So it validates the *accounting*,
+   not the cost models, which remain tested only against their own formulas. And because
    `open[t] == close[t-1]` by construction, the next-bar fill rule and partial fills are
-   exercised only by the synthetic tests, not by the replication.
-4. **Borrow accrues one interval early.** Financing is charged at each mark for the elapsed
-   interval using the position *after* that bar's fills, so a newly opened short is charged for
-   the interval preceding its own existence. The error is a single interval per position
-   lifetime, is in the conservative direction (overcharging), and is immaterial on a
-   multi-month hold — but it is wrong, and it is documented rather than fixed because the fix
-   needs the previous mark's positions carried as extra state.
-5. **`config.py` is at 0% coverage.** Nothing imports it yet — paths are passed explicitly
-   everywhere. It exists for the done-criterion scripts to use and is untested until they do.
-6. **No Parquet data handler.** `DataFrameDataHandler` holds everything in memory, which covers a
-   30-year daily backtest on 1,000 names (~7.5M rows) but not intraday. The `DataHandler`
-   contract is designed so a chunked Parquet reader drops in behind it; not needed yet.
-7. **Sector constraint binds on net, not gross.** An internally hedged sector passes the limit
-   even when its gross exposure is large. The principled fix is a factor-model constraint
-   (Project 10); this is the standard exposure-based approximation and is noted as such in
-   `risk.py`.
-8. **Impact coefficients are literature values, not fitted.** `eta`, `gamma`, and `Y` are round
-   numbers from published estimates. Any result sensitive to their exact value must be reported
-   as a range — `analytics/capacity.py` sweeps them for this reason, but no result has yet been
-   produced that needs it.
-9. **Pushed.** The session's work is on `main` at the remote: `99b7b82` (51 files, 8,677 lines)
-   on top of the repo's original `554490b`.
+   exercised only by the synthetic tests. Not a defect to fix — it is what isolating accounting
+   from timing costs you, and the README says so plainly.
+2. **Impact coefficients are literature values, not fitted.** `eta`, `gamma` and `Y` are round
+   numbers from published estimates, not measurements against any dataset here. Any result
+   sensitive to their exact value must be reported as a range; `analytics/capacity.py` sweeps
+   them for that reason. Fitting them properly needs order-level execution data this project
+   does not have and is unlikely to get.
+3. **Capacity estimates are an upper bound.** Costs scale with size in the model, but alpha decay
+   with size does not — a large book takes longer to build and the signal has decayed before the
+   position is on. Quantifying that needs a signal decay profile, which is Project 6.
+4. **Sector constraints are exposure-based, not risk-based.** Both the net and gross caps treat
+   two names in the same GICS sector as equally substitutable. The principled version constrains
+   estimated factor risk and needs a risk model — Project 10.
+
+### Deferred to another project
+
+5. **Bottom-up HML construction.** Building the six size × book-to-market portfolios from raw data
+   — the 2×3 sort, NYSE breakpoints, the June rebalance on prior-December accounting data — is
+   *the subject of Project 3* ("Fama-French factor replication"), not of a backtesting engine. It
+   was listed here because the done criterion mentions HML, but the criterion tests whether the
+   *backtester* is trustworthy, and that is settled. Reclassified rather than carried as debt.
+
+   It also depends on infrastructure that does not exist yet: Project 01 is verified only on a
+   smoke run (one EDGAR quarter, 40 tickers), its full bootstrap has never been executed, and its
+   price coverage for delisted companies is materially incomplete. Matching French bottom-up needs
+   CRSP + Compustat regardless.
+
+   The standing caution: "reproduces HML to 0.5 bps" must never be read as "can build HML from
+   scratch". README and `EXPLANATION.md` both say so explicitly.
+
+### Repository state
+
+6. **Not pushed.** The done-criterion work is committed as `e2e8c53`; this session's follow-up is
+   a second commit on top. Both are local — the remote is at `9e3d537`.

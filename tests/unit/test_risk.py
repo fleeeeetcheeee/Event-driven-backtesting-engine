@@ -87,11 +87,57 @@ class TestSectorCap:
         assert out["A"] + out["B"] == pytest.approx(0.20)
         assert out["C"] == pytest.approx(0.1)
 
-    def test_internally_hedged_sector_passes_on_net(self):
-        """Documented limitation: the constraint is on net, not gross."""
+    def test_internally_hedged_sector_passes_a_net_only_limit(self):
+        """
+        Net exposure is blind to this book: 50% long and 50% short the same
+        sector nets to zero. That is the whole reason `max_sector_gross_weight`
+        exists — see the next test.
+        """
         risk = RiskManager(RiskLimits(max_sector_weight=0.20), sectors=self.SECTORS)
         out = risk.apply({"A": 0.5, "B": -0.5})
         assert out == pytest.approx({"A": 0.5, "B": -0.5})
+
+    def test_gross_limit_catches_the_hedged_sector_that_net_misses(self):
+        """
+        A book 50% long and 50% short one sector carries a large bet on
+        within-sector dispersion while showing zero net exposure. A stat-arb
+        book is exactly this shape.
+        """
+        risk = RiskManager(
+            RiskLimits(max_sector_gross_weight=0.40), sectors=self.SECTORS
+        )
+        out = risk.apply({"A": 0.5, "B": -0.5}, timestamp=T0)
+
+        assert sum(abs(w) for w in out.values()) == pytest.approx(0.40)
+        assert risk.summary()["max_sector_gross_weight"] == 1
+
+    def test_gross_scaling_preserves_relative_sizing(self):
+        risk = RiskManager(
+            RiskLimits(max_sector_gross_weight=0.30), sectors=self.SECTORS
+        )
+        out = risk.apply({"A": 0.6, "B": -0.2})
+        assert out["A"] / out["B"] == pytest.approx(0.6 / -0.2)
+
+    def test_when_both_caps_bind_the_tighter_one_wins(self):
+        # Net 0.6 against a 0.30 cap wants scale 0.5; gross 0.8 against a 0.20
+        # cap wants scale 0.25. The gross limit is tighter and must govern.
+        risk = RiskManager(
+            RiskLimits(max_sector_weight=0.30, max_sector_gross_weight=0.20),
+            sectors=self.SECTORS,
+        )
+        out = risk.apply({"A": 0.7, "B": -0.1}, timestamp=T0)
+
+        assert sum(abs(w) for w in out.values()) == pytest.approx(0.20)
+        assert abs(sum(out.values())) <= 0.30 + 1e-9
+
+    def test_compliant_sector_is_untouched_under_both_caps(self):
+        risk = RiskManager(
+            RiskLimits(max_sector_weight=0.50, max_sector_gross_weight=0.50),
+            sectors=self.SECTORS,
+        )
+        out = risk.apply({"A": 0.2, "B": -0.1})
+        assert out == pytest.approx({"A": 0.2, "B": -0.1})
+        assert risk.violations == []
 
     def test_unmapped_symbols_pool_into_unknown_rather_than_escaping(self):
         risk = RiskManager(RiskLimits(max_sector_weight=0.20), sectors={})

@@ -79,6 +79,7 @@ class RiskLimits:
     max_gross_leverage: Optional[float] = None
     max_net_leverage: Optional[float] = None
     max_sector_weight: Optional[float] = None
+    max_sector_gross_weight: Optional[float] = None
     max_turnover: Optional[float] = None
 
     def __post_init__(self) -> None:
@@ -86,6 +87,7 @@ class RiskLimits:
             "max_position_weight",
             "max_gross_leverage",
             "max_sector_weight",
+            "max_sector_gross_weight",
             "max_turnover",
         ):
             value = getattr(self, name)
@@ -166,8 +168,27 @@ class RiskManager:
     def _apply_sector_caps(
         self, weights: dict[str, float], timestamp: Optional[datetime]
     ) -> dict[str, float]:
-        cap = self.limits.max_sector_weight
-        if cap is None:
+        """
+        Constrain sector exposure on net, gross, or both.
+
+        The two answer different questions and neither subsumes the other.
+        **Net** caps directional sector bets: a book 30% long energy is making a
+        call on energy. **Gross** caps sector concentration regardless of
+        direction: a book 40% long and 40% short energy has zero net exposure
+        and is nonetheless a large bet on energy *dispersion* — on the specific
+        names, on within-sector spreads, on a factor the net measure cannot see.
+        A pairs or stat-arb book is exactly this shape, which is why a net-only
+        limit passes it unchallenged while it carries real risk.
+
+        Both are still crude proxies. The principled version constrains exposure
+        to estimated factor risk rather than to sector membership, which needs a
+        risk model (Project 10). These are the standard exposure-based
+        approximations, and their limitation is that they treat two names in the
+        same GICS sector as equally substitutable when they may not be.
+        """
+        net_cap = self.limits.max_sector_weight
+        gross_cap = self.limits.max_sector_gross_weight
+        if net_cap is None and gross_cap is None:
             return weights
 
         by_sector: dict[str, list[str]] = {}
@@ -176,20 +197,31 @@ class RiskManager:
 
         out = dict(weights)
         for sector, symbols in by_sector.items():
-            net = sum(out[s] for s in symbols)
-            if abs(net) <= cap + EPS:
-                continue
-            self._record(timestamp, "max_sector_weight", sector, abs(net), cap)
-            # Scale the sector's *net* exposure down while preserving the
-            # relative sizing within it. Scaling every leg by the same factor
-            # also shrinks the sector's gross, which is a side effect worth
-            # knowing about: a sector that is internally hedged gets penalised
-            # for its net even though its risk is small. A factor-model-based
-            # constraint (Project 10) is the principled fix; this is the
-            # standard exposure-based approximation.
-            scale = cap / abs(net)
-            for s in symbols:
-                out[s] *= scale
+            # Scale the sector down while preserving relative sizing within it.
+            # When both caps bind, the tighter one wins — taking the minimum
+            # scale factor satisfies both in one pass, since each constraint is
+            # homogeneous of degree one in the weights.
+            scale = 1.0
+
+            if net_cap is not None:
+                net = sum(out[s] for s in symbols)
+                if abs(net) > net_cap + EPS:
+                    self._record(
+                        timestamp, "max_sector_weight", sector, abs(net), net_cap
+                    )
+                    scale = min(scale, net_cap / abs(net))
+
+            if gross_cap is not None:
+                gross = sum(abs(out[s]) for s in symbols)
+                if gross > gross_cap + EPS:
+                    self._record(
+                        timestamp, "max_sector_gross_weight", sector, gross, gross_cap
+                    )
+                    scale = min(scale, gross_cap / gross)
+
+            if scale < 1.0:
+                for s in symbols:
+                    out[s] *= scale
         return out
 
     def _apply_gross_leverage(

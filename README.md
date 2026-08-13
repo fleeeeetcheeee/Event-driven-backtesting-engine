@@ -20,7 +20,9 @@ python scripts/fetch_french_data.py
 python scripts/replicate_hml.py
 ```
 
-320 tests pass with 95% coverage. The replication is pinned in `tests/integration/test_hml_replication.py` (skipped until the data is fetched); the rest of the suite needs no network and no data.
+353 tests pass with 95% coverage. The replication is pinned in `tests/integration/test_hml_replication.py` (skipped until the data is fetched); the rest of the suite needs no network and no data.
+
+A plain-language companion for non-specialists is in [`EXPLANATION.md`](EXPLANATION.md), with a glossary.
 
 ### What this does and does not establish
 
@@ -51,7 +53,9 @@ src/evbt/
 │   └── event_queue.py           # deterministic (time, priority, sequence) heap
 ├── data/
 │   ├── base.py                  # DataHandler ABC — the no-lookahead guarantee
-│   └── frame.py                 # in-memory long-format source
+│   ├── frame.py                 # in-memory long-format source
+│   ├── parquet.py               # out-of-core: chunked DuckDB streaming
+│   └── french.py                # Ken French data library parser
 ├── strategy/base.py             # Strategy ABC + StrategyContext
 ├── portfolio/
 │   ├── position.py              # per-symbol accounting: flips, splits, dividends
@@ -207,6 +211,8 @@ print(estimate_capacity(
 
 **Factor attribution uses Newey-West standard errors.** Strategy returns are autocorrelated whenever positions persist, and the autocorrelation biases OLS standard errors *downwards* — inflating t-statistics on exactly the strategies that hold longest. Implemented directly in numpy rather than pulled from statsmodels, with the Bartlett kernel and the `L = ⌊4(n/100)^(2/9)⌋` rule of thumb.
 
+**Data sources are interchangeable, and chunk size is invisible.** `DataFrameDataHandler` holds history in RAM — fine to a few million rows, which covers a 30-year daily backtest on 1,000 names. `ParquetDataHandler` streams the same data in date chunks through DuckDB, so peak memory is set by the chunk size rather than the length of the backtest, and predicate pushdown means only the relevant partitions are ever opened. Both satisfy the same `DataHandler` contract, and the tests assert that chunk sizes of 1, 7, 50 and 10,000 produce byte-identical slices to the in-memory handler. That matters: a backtest whose results depended on how much RAM the machine had would not be reproducible. It required carrying a volatility warm-up tail across chunk boundaries, without which every boundary produces a run of bars with no vol estimate and therefore no slippage.
+
 **Walk-forward folds are half-open.** `[start, end)` on both train and test windows. With inclusive bounds and a zero embargo, the bar at `train_end == test_start` is both trained on and scored — and the same collision between consecutive test windows would double-count it in the stitched out-of-sample series. The embargo defaults to zero because the correct value is the forward-looking horizon of the strategy's labels, and a wrong non-zero default would be worse than making the choice explicit.
 
 ## What is not done
@@ -227,9 +233,7 @@ Read this before trusting anything the engine produces.
 
 **Capacity estimates are an upper bound, not a central estimate.** The model scales costs with size but does not model alpha decaying with size. A large book takes longer to build, and a signal with a five-day half-life has decayed materially before the position is on. Quantifying that needs the signal's decay profile, which is Project 6. Read the numbers as "no more than this".
 
-**Sector constraints bind on net exposure, not gross.** An internally hedged sector passes the limit however large its gross. The principled fix is a factor-model constraint (Project 10); this is the standard exposure-based approximation.
-
-**In-memory data only.** `DataFrameDataHandler` holds everything in RAM, which covers a 30-year daily backtest on a 1,000-name universe (~7.5M rows) but not intraday or tick. The `DataHandler` contract is built so a chunked Parquet reader drops in behind it unchanged; that reader does not exist yet.
+**Sector constraints are exposure-based, not risk-based.** Both caps — `max_sector_weight` on net and `max_sector_gross_weight` on gross — treat two names in the same GICS sector as equally substitutable. The principled version constrains estimated factor risk and needs a risk model (Project 10). Note that net and gross answer different questions and neither subsumes the other: a book 50% long and 50% short one sector has zero net exposure and a large bet on within-sector dispersion, which is exactly the shape of a stat-arb book.
 
 **Fractional shares are permitted by default.** `round_lots=True` on the constructor turns this off. At institutional size the difference is immaterial; for a small account it removes a real rounding drag.
 

@@ -167,12 +167,16 @@ class TestShortAccounting:
       day 1   sell 500 @ 100 -> cash 150,000, position -50,000, NAV 100,000
       carry   50,000 notional x 5% x (days / 360)
 
-    Marks run 2024-01-01 to 2024-01-12, which is 11 calendar days of accrual
-    (the Jan 5 -> Jan 8 mark spans the weekend and is charged three days, as it
-    must be: borrow accrues on calendar days, not sessions).
+    Marks run 2024-01-01 to 2024-01-12. The short exists from day 1's fill, and
+    carry is charged against the book as it stood at the *previous* mark — so
+    the interval [Jan 1, Jan 2] is financed on a flat book and costs nothing.
+    Accrual therefore runs Jan 2 -> Jan 12: **10 calendar days**, not 11.
 
-      total borrow = 50,000 x 0.05 x 11 / 360 = 76.3889
-      final NAV    = 100,000 - 76.3889 = 99,923.61
+    Calendar days, not sessions: the Jan 5 -> Jan 8 mark spans the weekend and
+    is charged three days, as it must be.
+
+      total borrow = 50,000 x 0.05 x 10 / 360 = 69.4444
+      final NAV    = 100,000 - 69.4444 = 99,930.56
     """
 
     @staticmethod
@@ -191,12 +195,25 @@ class TestShortAccounting:
 
     def test_borrow_cost_matches_the_hand_calculation(self):
         _, portfolio = self._run()
-        expected = 50_000.0 * 0.05 * 11.0 / 360.0
+        expected = 50_000.0 * 0.05 * 10.0 / 360.0
         assert portfolio.cumulative_financing == pytest.approx(expected)
 
     def test_final_nav_is_capital_less_borrow(self):
         result, _ = self._run()
-        assert result.final_nav == pytest.approx(100_000.0 - 76.38888888, abs=1e-6)
+        assert result.final_nav == pytest.approx(100_000.0 - 69.44444444, abs=1e-6)
+
+    def test_no_carry_is_charged_before_the_position_exists(self):
+        """
+        Regression test for a fixed bug: carry was accrued against the book
+        *after* each bar's fills, so a short opened on day 1 was charged for the
+        night of day 0, when it did not exist. One interval per position — small,
+        conservative, and wrong.
+        """
+        _, portfolio = self._run()
+        daily = portfolio.equity_curve()["cumulative_financing"].diff()
+
+        assert daily.iloc[1] == pytest.approx(0.0)  # fill happens on this bar
+        assert daily.iloc[2] > 0.0                  # first genuine overnight
 
     def test_weekend_is_charged_three_days(self):
         """

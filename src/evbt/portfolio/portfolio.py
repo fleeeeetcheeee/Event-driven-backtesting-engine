@@ -116,6 +116,10 @@ class Portfolio:
 
         self._last_mark_time: Optional[datetime] = None
         self._turnover_since_snapshot = 0.0
+        # Short market values as of the last mark. Financing for the interval
+        # that follows is charged against this, not against the live book —
+        # see `_snapshot_financing_basis`.
+        self._financing_basis: dict[str, float] = {}
 
     # --- valuation ---------------------------------------------------------
 
@@ -251,10 +255,9 @@ class Portfolio:
         """
         Mark the book to the new bars, accrue carry, and snapshot.
 
-        Order matters: carry is charged on the *previous* marks, covering the
-        interval that just elapsed, before the new prices are applied. Charging
-        it on today's marks would finance a position at a price it did not have
-        during the period being financed.
+        Carry for the interval that just elapsed is charged against the book as
+        it stood at the *previous* mark, then today's prices are applied. Both
+        halves of that ordering matter — see `_accrue_financing`.
         """
         self._accrue_financing(event.timestamp)
 
@@ -266,6 +269,27 @@ class Portfolio:
 
         self._last_mark_time = event.timestamp
         self._record_snapshot(event.timestamp)
+        self._snapshot_financing_basis()
+
+    def _snapshot_financing_basis(self) -> None:
+        """
+        Record the short book as it stands at this mark, to be financed over the
+        interval that follows.
+
+        Carry is owed on what was *held* through an interval, and the position
+        held through `[t-1, t]` is the one that existed at `t-1` — not the one
+        that exists at `t`, which already includes today's fills. Accruing
+        against the current book charges a short opened this morning for the
+        night before it existed, and credits nothing for one closed this
+        morning that was in fact borrowed all night. Both errors are a single
+        interval per position, but they are errors, and holding the basis
+        explicitly is cheaper than explaining the discrepancy later.
+        """
+        self._financing_basis = {
+            symbol: position.market_value(self._marks.get(symbol))
+            for symbol, position in self.positions.items()
+            if position.is_short
+        }
 
     def _accrue_financing(self, now: datetime) -> None:
         if self._last_mark_time is None:
@@ -275,15 +299,15 @@ class Portfolio:
             return
 
         total = 0.0
-        for symbol, position in self.positions.items():
-            if not position.is_short:
-                continue
-            charge = self.financing.borrow_charge(
-                symbol, position.market_value(self._marks.get(symbol)), days
-            )
-            position.accrue_borrow(charge)
-            total += charge
+        for symbol, market_value in self._financing_basis.items():
+            charge = self.financing.borrow_charge(symbol, market_value, days)
+            if charge:
+                self.position(symbol).accrue_borrow(charge)
+                total += charge
 
+        # Cash interest uses the live balance rather than a snapshot: unlike a
+        # borrow, which is contracted against a specific position held overnight,
+        # the cash balance is what it is at the moment interest is computed.
         interest = self.financing.cash_interest(self.cash, days)
         self.cash += interest - total
         self.cumulative_financing += total - interest
