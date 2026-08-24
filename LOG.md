@@ -390,5 +390,5 @@ fixable) and work that belongs to a different project.
 
 ### Repository state
 
-6. **Not pushed.** The done-criterion work is committed as `e2e8c53`; this session's follow-up is
-   a second commit on top. Both are local — the remote is at `9e3d537`.
+6. ~~**Not pushed.**~~ **Closed** — both commits are on `origin/main`: `e2e8c53` (HML replication)
+   and `dace4bb` (open-item follow-up). Working tree clean, nothing outstanding.
